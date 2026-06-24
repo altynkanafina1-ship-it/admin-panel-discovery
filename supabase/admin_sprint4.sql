@@ -1,59 +1,35 @@
 -- ============================================================
--- Shashki Royale · Admin Panel · Sprint 4 — Player 360 Actions
+-- Shashki Royale · Admin Panel · Sprint 4 (v2, safe re-run)
 -- ============================================================
--- Idempotent.  Apply via Supabase SQL Editor.
--- Adds:
---   • profiles.suspended_until / suspension_reason
---   • wallet_transactions.type now accepts 'admin_grant' / 'admin_refund' / 'admin_adjustment'
---   • RPC functions called by Cloudflare Pages Function
---   • Audit table additions (idempotency_key already in admin_audit_log)
--- All RPCs run with SECURITY DEFINER and accept service_role only.
+-- Apply via Supabase SQL Editor.  Idempotent.  No BEGIN/COMMIT
+-- so partial failure is visible immediately and previous parts stay applied.
 -- ============================================================
-
-BEGIN;
 
 -- ── 1. Suspension columns on profiles ─────────────────────────
-DO $$ BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_name='profiles' AND column_name='suspended_until'
-  ) THEN
-    ALTER TABLE public.profiles ADD COLUMN suspended_until timestamptz NULL;
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_name='profiles' AND column_name='suspension_reason'
-  ) THEN
-    ALTER TABLE public.profiles ADD COLUMN suspension_reason text NULL;
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_name='profiles' AND column_name='suspended_by'
-  ) THEN
-    ALTER TABLE public.profiles ADD COLUMN suspended_by text NULL;
-  END IF;
-END $$;
+ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS suspended_until    timestamptz NULL,
+  ADD COLUMN IF NOT EXISTS suspension_reason  text         NULL,
+  ADD COLUMN IF NOT EXISTS suspended_by       text         NULL;
 
 CREATE INDEX IF NOT EXISTS profiles_suspended_until_idx
   ON public.profiles (suspended_until)
   WHERE suspended_until IS NOT NULL;
 
 -- ── 2. Allow admin transaction types ──────────────────────────
--- Re-create CHECK constraint to include admin types.
+-- Drop ALL existing CHECK constraints on wallet_transactions.type
 DO $$
-DECLARE
-  cname text;
+DECLARE r record;
 BEGIN
-  SELECT conname INTO cname FROM pg_constraint
-  WHERE conrelid = 'public.wallet_transactions'::regclass
-    AND contype='c'
-    AND pg_get_constraintdef(oid) ILIKE '%type%';
-  IF cname IS NOT NULL THEN
-    EXECUTE format('ALTER TABLE public.wallet_transactions DROP CONSTRAINT %I', cname);
-  END IF;
+  FOR r IN
+    SELECT conname FROM pg_constraint
+    WHERE conrelid = 'public.wallet_transactions'::regclass
+      AND contype  = 'c'
+      AND pg_get_constraintdef(oid) ~* 'type'
+  LOOP
+    EXECUTE format('ALTER TABLE public.wallet_transactions DROP CONSTRAINT %I', r.conname);
+  END LOOP;
 END $$;
 
--- Liberal accepted list (won't reject older values either)
 ALTER TABLE public.wallet_transactions
   ADD CONSTRAINT wallet_transactions_type_check
   CHECK (type IN (
@@ -64,23 +40,21 @@ ALTER TABLE public.wallet_transactions
     'admin_grant','admin_refund','admin_adjustment'
   ));
 
--- Drop the amount >= 0 constraint if it exists, allow negatives for admin_adjustment
+-- Drop the amount >= 0 CHECK so admin_adjustment can be negative
 DO $$
-DECLARE
-  cname text;
+DECLARE r record;
 BEGIN
-  SELECT conname INTO cname FROM pg_constraint
-  WHERE conrelid = 'public.wallet_transactions'::regclass
-    AND contype='c'
-    AND pg_get_constraintdef(oid) ILIKE '%amount%>=%0%';
-  IF cname IS NOT NULL THEN
-    EXECUTE format('ALTER TABLE public.wallet_transactions DROP CONSTRAINT %I', cname);
-  END IF;
+  FOR r IN
+    SELECT conname FROM pg_constraint
+    WHERE conrelid = 'public.wallet_transactions'::regclass
+      AND contype  = 'c'
+      AND pg_get_constraintdef(oid) ~* 'amount'
+  LOOP
+    EXECUTE format('ALTER TABLE public.wallet_transactions DROP CONSTRAINT %I', r.conname);
+  END LOOP;
 END $$;
 
 -- ── 3. RPC: admin_grant_coin ──────────────────────────────────
--- Adds Coin to a player wallet, writes wallet_transactions row,
--- returns the new balance.
 CREATE OR REPLACE FUNCTION public.admin_grant_coin(
   p_profile_id  uuid,
   p_amount      numeric,
@@ -104,44 +78,41 @@ BEGIN
     RAISE EXCEPTION 'reason_required';
   END IF;
 
-  -- Ensure wallet exists
   INSERT INTO wallets (profile_id, crypto_balance, locked_balance)
   VALUES (p_profile_id, 0, 0)
   ON CONFLICT (profile_id) DO NOTHING;
 
-  SELECT crypto_balance INTO v_before FROM wallets WHERE profile_id = p_profile_id FOR UPDATE;
+  SELECT crypto_balance INTO v_before
+  FROM wallets WHERE profile_id = p_profile_id FOR UPDATE;
+
   v_after := v_before + p_amount;
   IF v_after < 0 THEN
     RAISE EXCEPTION 'insufficient_balance';
   END IF;
 
   UPDATE wallets
-  SET crypto_balance = v_after,
-      updated_at = now()
+  SET crypto_balance = v_after, updated_at = now()
   WHERE profile_id = p_profile_id;
 
   INSERT INTO wallet_transactions (profile_id, type, amount, status, note)
   VALUES (
     p_profile_id,
     CASE WHEN p_amount > 0 THEN 'admin_grant' ELSE 'admin_adjustment' END,
-    p_amount,
-    'completed',
+    p_amount, 'completed',
     format('[admin:%s] %s', p_actor, p_reason)
   )
   RETURNING id INTO v_tx_id;
 
   RETURN jsonb_build_object(
-    'tx_id',        v_tx_id,
-    'profile_id',   p_profile_id,
-    'amount',       p_amount,
-    'balance_before', v_before,
-    'balance_after',  v_after
+    'tx_id', v_tx_id, 'profile_id', p_profile_id,
+    'amount', p_amount,
+    'balance_before', v_before, 'balance_after', v_after
   );
 END $$;
 
+GRANT EXECUTE ON FUNCTION public.admin_grant_coin(uuid, numeric, text, text) TO service_role;
+
 -- ── 4. RPC: admin_refund_stake ────────────────────────────────
--- Returns the entry fee to both players (if the stake is still
--- in escrow / not paid).  Marks stake as refunded.
 CREATE OR REPLACE FUNCTION public.admin_refund_stake(
   p_stake_id  uuid,
   p_reason    text,
@@ -169,59 +140,48 @@ BEGIN
 
   v_each := v_stake.entry_fee;
 
-  -- Refund white
   IF v_stake.white_profile_id IS NOT NULL THEN
     UPDATE wallets
     SET crypto_balance = crypto_balance + v_each,
         locked_balance = GREATEST(locked_balance - v_each, 0),
-        updated_at     = now()
+        updated_at = now()
     WHERE profile_id = v_stake.white_profile_id
     RETURNING crypto_balance INTO v_white_balance;
 
     INSERT INTO wallet_transactions (profile_id, game_id, type, amount, status, note)
-    VALUES (
-      v_stake.white_profile_id, v_stake.game_id,
-      'stake_refund', v_each, 'completed',
-      format('[admin:%s] refund stake %s — %s', p_actor, p_stake_id, p_reason)
-    );
+    VALUES (v_stake.white_profile_id, v_stake.game_id, 'stake_refund', v_each, 'completed',
+      format('[admin:%s] refund stake %s — %s', p_actor, p_stake_id, p_reason));
   END IF;
 
-  -- Refund black
   IF v_stake.black_profile_id IS NOT NULL THEN
     UPDATE wallets
     SET crypto_balance = crypto_balance + v_each,
         locked_balance = GREATEST(locked_balance - v_each, 0),
-        updated_at     = now()
+        updated_at = now()
     WHERE profile_id = v_stake.black_profile_id
     RETURNING crypto_balance INTO v_black_balance;
 
     INSERT INTO wallet_transactions (profile_id, game_id, type, amount, status, note)
-    VALUES (
-      v_stake.black_profile_id, v_stake.game_id,
-      'stake_refund', v_each, 'completed',
-      format('[admin:%s] refund stake %s — %s', p_actor, p_stake_id, p_reason)
-    );
+    VALUES (v_stake.black_profile_id, v_stake.game_id, 'stake_refund', v_each, 'completed',
+      format('[admin:%s] refund stake %s — %s', p_actor, p_stake_id, p_reason));
   END IF;
 
   UPDATE game_stakes
-  SET escrow_status = 'refunded',
-      payout_status = 'refunded',
-      updated_at    = now()
+  SET escrow_status = 'refunded', payout_status = 'refunded', updated_at = now()
   WHERE id = p_stake_id;
 
   RETURN jsonb_build_object(
-    'stake_id',       p_stake_id,
-    'each',           v_each,
-    'white_balance',  v_white_balance,
-    'black_balance',  v_black_balance
+    'stake_id', p_stake_id, 'each', v_each,
+    'white_balance', v_white_balance, 'black_balance', v_black_balance
   );
 END $$;
 
+GRANT EXECUTE ON FUNCTION public.admin_refund_stake(uuid, text, text) TO service_role;
+
 -- ── 5. RPC: admin_set_suspension ──────────────────────────────
--- Sets/clears suspended_until on a profile.
 CREATE OR REPLACE FUNCTION public.admin_set_suspension(
   p_profile_id uuid,
-  p_hours      integer,   -- 0 / NULL = unsuspend
+  p_hours      integer,
   p_reason     text,
   p_actor      text
 )
@@ -235,10 +195,8 @@ DECLARE
 BEGIN
   IF p_hours IS NULL OR p_hours <= 0 THEN
     UPDATE profiles
-    SET suspended_until = NULL,
-        suspension_reason = NULL,
-        suspended_by = NULL,
-        updated_at = now()
+    SET suspended_until = NULL, suspension_reason = NULL,
+        suspended_by = NULL, updated_at = now()
     WHERE id = p_profile_id;
     RETURN jsonb_build_object('profile_id', p_profile_id, 'suspended', false);
   END IF;
@@ -250,29 +208,25 @@ BEGIN
   v_until := now() + (p_hours::text || ' hours')::interval;
 
   UPDATE profiles
-  SET suspended_until    = v_until,
-      suspension_reason  = p_reason,
-      suspended_by       = p_actor,
-      updated_at         = now()
+  SET suspended_until = v_until, suspension_reason = p_reason,
+      suspended_by = p_actor, updated_at = now()
   WHERE id = p_profile_id;
 
   RETURN jsonb_build_object(
-    'profile_id',     p_profile_id,
-    'suspended',      true,
-    'suspended_until', v_until,
-    'reason',         p_reason
+    'profile_id', p_profile_id, 'suspended', true,
+    'suspended_until', v_until, 'reason', p_reason
   );
 END $$;
 
--- ── 6. Optional: expose suspension info on public_profiles ────
--- Skipped to keep anon view minimal; admin reads via /api/admin/players/:id
--- (which uses service_role).
+GRANT EXECUTE ON FUNCTION public.admin_set_suspension(uuid, integer, text, text) TO service_role;
 
-COMMIT;
+-- ── 6. Reload PostgREST schema cache ──────────────────────────
+NOTIFY pgrst, 'reload schema';
 
--- ============================================================
--- Verification:
---   SELECT proname FROM pg_proc WHERE proname LIKE 'admin_%';
---   SELECT column_name FROM information_schema.columns
---     WHERE table_name='profiles' AND column_name LIKE 'suspend%';
--- ============================================================
+-- ── 7. Verification ───────────────────────────────────────────
+SELECT
+  proname,
+  pg_get_function_arguments(oid) AS args
+FROM pg_proc
+WHERE proname IN ('admin_grant_coin', 'admin_refund_stake', 'admin_set_suspension')
+ORDER BY proname;
