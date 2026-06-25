@@ -1,0 +1,23 @@
+name: admin-panel
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, "fix/**", "audit/**"]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: yarn
+      - run: yarn install --frozen-lockfile
+      - run: yarn typecheck
+      - run: yarn build
+      - name: smoke /api/health response shape
+        run: |
+          test -f dist/index.html
+          test ! -f dist/assets/*.map 2>/dev/null || (echo "source maps leaked into dist"; exit 1)

@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { LockKeyhole, Mail, ShieldCheck } from "lucide-react";
-import { login } from "@/services/auth";
+import { login, type AdminSession } from "@/services/auth";
 
-export default function LoginScreen({ onSuccess }: { onSuccess: () => void }) {
+export default function LoginScreen({ onSuccess }: { onSuccess: (s: AdminSession) => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [err, setErr] = useState<string | null>(null);
@@ -13,11 +13,13 @@ export default function LoginScreen({ onSuccess }: { onSuccess: () => void }) {
     setBusy(true);
     setErr(null);
     try {
-      await login(email, password);
-      onSuccess();
+      const s = await login(email, password);
+      onSuccess(s);
     } catch (ex) {
       const msg = ex instanceof Error ? ex.message : "login_failed";
-      setErr(msg === "invalid_credentials" ? "Неверный email или пароль" : "Не удалось войти. Попробуйте ещё раз.");
+      if (msg === "invalid_credentials") setErr("Неверный email или пароль");
+      else if (msg === "rate_limited") setErr("Слишком много попыток. Попробуйте через минуту.");
+      else setErr("Не удалось войти. Попробуйте ещё раз.");
     } finally {
       setBusy(false);
     }
@@ -38,7 +40,7 @@ export default function LoginScreen({ onSuccess }: { onSuccess: () => void }) {
           <span className="text-gold-300">Шашки Рояль</span>
         </h1>
         <p className="text-sm text-ink-400 mt-3 leading-relaxed">
-          Введите email и пароль владельца. JWT-сессия живёт 8 часов.
+          Введите email и пароль владельца. Сессия защищена HttpOnly-куки.
         </p>
         <form onSubmit={submit} className="mt-6 space-y-3" data-testid="login-form">
           <div className="relative">
@@ -69,13 +71,14 @@ export default function LoginScreen({ onSuccess }: { onSuccess: () => void }) {
           <button type="submit" disabled={busy} className="btn-gold w-full justify-center py-3 disabled:opacity-60 disabled:cursor-not-allowed" data-testid="login-submit">
             {busy ? "входим…" : "Войти"}
           </button>
-          {err && <div className="text-xs text-accent-rose/90 px-1 pt-1 mono">{err}</div>}
+          {err && <div className="text-xs text-accent-rose/90 px-1 pt-1 mono" data-testid="login-error">{err}</div>}
         </form>
         <div className="mt-7 pt-5 border-t border-white/[0.05] flex items-start gap-3 text-[12px] text-ink-400 leading-relaxed">
           <ShieldCheck className="w-4 h-4 text-accent-mint mt-0.5 shrink-0" />
           <span>
-            Сервер: Cloudflare Pages Function · пароль защищён PBKDF2-SHA256 (120k итераций) ·
-            service_role хранится только на сервере и никогда не попадает в браузер.
+            Сервер: Cloudflare Pages Function · пароль защищён PBKDF2-SHA256 ·
+            JWT в <span className="mono text-ink-300">HttpOnly</span> cookie ·
+            service_role хранится только на сервере.
           </span>
         </div>
       </div>

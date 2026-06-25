@@ -68,6 +68,15 @@ export default function Players() {
     setPage(0);
   }
 
+  // CSV formula injection guard (FIND-018) — prefix any cell starting with
+  // a spreadsheet-formula character with a single quote so Excel/LibreOffice
+  // treat it as literal text.
+  function csvCell(v: string | number | null | undefined): string {
+    const raw = String(v ?? "");
+    const safe = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+    // Always wrap in double quotes and escape embedded quotes.
+    return `"${safe.replace(/"/g, '""')}"`;
+  }
   function exportCsv() {
     const header = [
       "id",
@@ -84,17 +93,17 @@ export default function Players() {
     ];
     const lines = rows.map((p) =>
       [
-        p.id,
-        JSON.stringify(p.nickname),
-        p.rating,
-        p.total_games,
-        p.wins,
-        p.losses,
-        p.draws,
-        p.win_streak,
-        p.best_win_streak,
-        p.created_at,
-        p.last_seen_at,
+        csvCell(p.id),
+        csvCell(p.nickname),
+        csvCell(p.rating),
+        csvCell(p.total_games),
+        csvCell(p.wins),
+        csvCell(p.losses),
+        csvCell(p.draws),
+        csvCell(p.win_streak),
+        csvCell(p.best_win_streak),
+        csvCell(p.created_at),
+        csvCell(p.last_seen_at),
       ].join(","),
     );
     const csv = [header.join(","), ...lines].join("\n");

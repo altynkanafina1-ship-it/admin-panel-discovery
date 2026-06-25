@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -65,6 +65,10 @@ export default function PlayerDetail() {
   const toast = useToast();
   const [modal, setModal] = useState<ModalKind>(null);
   const [refundTarget, setRefundTarget] = useState<Stake | null>(null);
+  // Hoist idempotency_key per opened modal/refund instance so retries reuse the same key (FIND-045).
+  const grantIdem = useMemo(() => (modal === "grant" || modal === "deduct" ? crypto.randomUUID() : ""), [modal]);
+  const suspendIdem = useMemo(() => (modal === "suspend" || modal === "unsuspend" ? crypto.randomUUID() : ""), [modal]);
+  const refundIdem = useMemo(() => (refundTarget ? crypto.randomUUID() : ""), [refundTarget]);
 
   const player = useQuery({ queryKey: ["player", id], queryFn: () => fetchPlayer(id) });
 
@@ -517,7 +521,7 @@ export default function PlayerDetail() {
         onClose={() => setModal(null)}
         onSubmit={async (v) => {
           const amount = Number(v.amount);
-          await grantCoin(id, amount, v.reason);
+          await grantCoin(id, amount, v.reason, grantIdem);
           toast.push({
             kind: "info",
             title: `+${fmtCoin(amount)} Coin начислено`,
@@ -537,7 +541,7 @@ export default function PlayerDetail() {
         onClose={() => setModal(null)}
         onSubmit={async (v) => {
           const amount = -Math.abs(Number(v.amount));
-          await grantCoin(id, amount, v.reason);
+          await grantCoin(id, amount, v.reason, grantIdem);
           toast.push({
             kind: "warn",
             title: `${fmtCoin(amount)} Coin списано`,
@@ -557,7 +561,7 @@ export default function PlayerDetail() {
         onClose={() => setModal(null)}
         onSubmit={async (v) => {
           const hours = parseInt(v.hours, 10) || 24;
-          await suspendPlayer(id, hours, v.reason);
+          await suspendPlayer(id, hours, v.reason, suspendIdem);
           toast.push({
             kind: "warn",
             title: `Игрок заблокирован на ${hours}ч`,
@@ -584,7 +588,7 @@ export default function PlayerDetail() {
         ]}
         onClose={() => setModal(null)}
         onSubmit={async (v) => {
-          await suspendPlayer(id, 0, v.reason || "unsuspend");
+          await suspendPlayer(id, 0, v.reason || "unsuspend", suspendIdem);
           toast.push({ kind: "info", title: "Блокировка снята" });
           invalidate();
         }}
@@ -612,7 +616,7 @@ export default function PlayerDetail() {
         onClose={() => setRefundTarget(null)}
         onSubmit={async (v) => {
           if (!refundTarget) return;
-          await refundStake(refundTarget.id, v.reason);
+          await refundStake(refundTarget.id, v.reason, refundIdem);
           toast.push({
             kind: "info",
             title: `Ставка ${fmtCoin(Number(refundTarget.entry_fee))} возвращена`,
