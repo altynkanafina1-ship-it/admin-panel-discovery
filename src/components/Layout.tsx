@@ -107,12 +107,18 @@ export default function Layout({
             <span className="mono text-ink-500">v1.1</span>
           </div>
           <button
-            onClick={async () => {
-              await logout();
+            onClick={() => {
+              // 1) Immediately cancel in-flight queries and wipe the
+              //    cache so background refetches can't race against
+              //    the cookie-clear and surface 401s in the console.
+              qc.cancelQueries();
               qc.clear();
+              // 2) Flip UI to the login screen synchronously.
               onLogout();
+              // 3) Fire-and-forget the server-side cookie clear.
+              void logout();
             }}
-            data-testid="logout-btn"
+            data-testid="logout-button"
             className="mt-4 w-full text-xs text-ink-400 hover:text-ink-200 transition-colors flex items-center justify-center gap-2 py-2 rounded-lg border border-white/[0.04] hover:border-white/[0.08]"
           >
             <LogOut className="w-3 h-3" />
