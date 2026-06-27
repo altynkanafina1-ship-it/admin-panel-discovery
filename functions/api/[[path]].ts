@@ -147,6 +147,12 @@ function json(body: unknown, req: Request, env: Env, init: ResponseInit = {}): R
     headers: {
       "content-type": "application/json",
       "cache-control": "no-store",
+      // FIND V2-007: Pages Function responses do not inherit public/_headers.
+      "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+      "x-frame-options": "DENY",
+      "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
       ...originHeaders(env, req),
       ...(init.headers ?? {}),
     },
@@ -359,6 +365,172 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
 
     if (route === "/auth/me" && req.method === "GET") {
       return json({ email: auth.email, role: auth.role, exp: auth.payload.exp }, req, env);
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // SECURE REALTIME GATEWAY — SSE (FIND V2-003)
+    // Cookie-authenticated (sits below the auth gate). Reads with service_role
+    // server-side, sanitises payloads (NO email / auth_user_id / IP / tokens),
+    // and forwards only AdminRealtimeEvent frames. The browser never holds
+    // service_role and never subscribes to Supabase directly.
+    // v1 transport = bounded service-role cursor polling (see ADR). Connection
+    // is capped (~50s) so EventSource auto-reconnect refreshes the lease.
+    // ──────────────────────────────────────────────────────────────────
+    if (route === "/realtime/stream" && req.method === "GET") {
+      const eid = () => crypto.randomUUID();
+      const epoch = (s?: string | null) => (s ? Date.parse(s) || 0 : 0);
+      const rows = async (path: string): Promise<Record<string, unknown>[]> => {
+        try {
+          const r = await sb(env, path);
+          const j = await r.json().catch(() => []);
+          return Array.isArray(j) ? (j as Record<string, unknown>[]) : [];
+        } catch {
+          return [];
+        }
+      };
+      const nowIso = () => new Date().toISOString();
+      const TICK_MS = 1500;
+      const MAX_MS = 50_000;
+
+      // Start cursors "now" → stream only NEW changes; existing state comes
+      // from REST snapshots on the client (hybrid, per ADR).
+      let cGames = nowIso();
+      let cMoves = nowIso();
+      let cStakes = nowIso();
+      let cPresence = nowIso();
+      let cTx = nowIso();
+
+      const stream = new ReadableStream({
+        async start(controller) {
+          const send = (e: Record<string, unknown>) =>
+            controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
+          const started = Date.now();
+          const streamId = eid();
+
+          send({ _schema: 1 });
+          send({
+            event_id: eid(), event_type: "system.connected", entity_type: "system",
+            entity_id: "-", occurred_at: nowIso(), actor_type: "system",
+            payload: { stream_id: streamId, role: auth.role },
+          });
+
+          try {
+            while (Date.now() - started < MAX_MS) {
+              const tickStart = Date.now();
+
+              // ── Games (created/started/turn/ended) ──────────────────
+              const games = await rows(
+                `/rest/v1/games?select=id,room_code,status,current_turn,move_number,winner,resign_reason,created_at,updated_at&updated_at=gt.${encodeURIComponent(cGames)}&order=updated_at.asc&limit=40`,
+              );
+              for (const g of games) {
+                cGames = (g.updated_at as string) || cGames;
+                const ver = epoch(g.updated_at as string);
+                const base = { game_id: g.id, room_code: g.room_code };
+                let type = "game.updated";
+                if (g.status === "waiting") type = "game.created";
+                else if (g.status === "playing" && g.move_number === 0) type = "game.started";
+                else if (g.status === "playing") type = "game.turn_changed";
+                else if (g.status === "finished") type = "game.ended";
+                send({
+                  event_id: eid(), event_type: type, entity_type: "game",
+                  entity_id: g.id, occurred_at: g.updated_at, version: ver,
+                  actor_type: "player",
+                  payload: g.status === "finished"
+                    ? { ...base, winner: g.winner ?? null, resign_reason: g.resign_reason ?? null }
+                    : { ...base, status: g.status, current_turn: g.current_turn ?? null, move_number: g.move_number ?? 0 },
+                });
+              }
+
+              // ── Moves (delta only — never full board) ───────────────
+              const moves = await rows(
+                `/rest/v1/moves?select=game_id,move_number,player_color,created_at&created_at=gt.${encodeURIComponent(cMoves)}&order=created_at.asc&limit=60`,
+              );
+              for (const m of moves) {
+                cMoves = (m.created_at as string) || cMoves;
+                send({
+                  event_id: eid(), event_type: "game.move", entity_type: "game",
+                  entity_id: m.game_id, occurred_at: m.created_at,
+                  version: Number(m.move_number) || undefined, actor_type: "player",
+                  payload: { game_id: m.game_id, move_number: m.move_number, player_color: m.player_color },
+                });
+              }
+
+              // ── Stakes / economy ────────────────────────────────────
+              const stakes = await rows(
+                `/rest/v1/game_stakes?select=id,game_id,entry_fee,pot_amount,escrow_status,payout_status,updated_at&updated_at=gt.${encodeURIComponent(cStakes)}&order=updated_at.asc&limit=40`,
+              );
+              for (const s of stakes) {
+                cStakes = (s.updated_at as string) || cStakes;
+                let type = "stake.updated";
+                if (s.payout_status === "paid") type = "stake.payout";
+                else if (s.payout_status === "refunded") type = "stake.refund";
+                else if (s.escrow_status === "locked") type = "stake.locked";
+                send({
+                  event_id: eid(), event_type: type, entity_type: "stake",
+                  entity_id: s.id, occurred_at: s.updated_at, version: epoch(s.updated_at as string),
+                  actor_type: "system",
+                  payload: {
+                    stake_id: s.id, game_id: s.game_id, entry_fee: Number(s.entry_fee || 0),
+                    pot_amount: Number(s.pot_amount || 0), escrow_status: s.escrow_status, payout_status: s.payout_status,
+                  },
+                });
+              }
+
+              // ── Presence (throttled last_seen) ──────────────────────
+              const presence = await rows(
+                `/rest/v1/public_profiles?select=id,nickname,avatar_index,last_seen_at&last_seen_at=gt.${encodeURIComponent(cPresence)}&order=last_seen_at.asc&limit=40`,
+              );
+              for (const p of presence) {
+                cPresence = (p.last_seen_at as string) || cPresence;
+                send({
+                  event_id: eid(), event_type: "player.online", entity_type: "player",
+                  entity_id: p.id, occurred_at: p.last_seen_at, version: epoch(p.last_seen_at as string),
+                  actor_type: "player",
+                  payload: { profile_id: p.id, nickname: p.nickname, avatar_index: p.avatar_index ?? 0 },
+                });
+              }
+
+              // ── Wallet transactions (admin-authorised; no PII) ──────
+              const tx = await rows(
+                `/rest/v1/wallet_transactions?select=id,profile_id,type,amount,balance_after,created_at&created_at=gt.${encodeURIComponent(cTx)}&order=created_at.asc&limit=40`,
+              );
+              for (const t of tx) {
+                cTx = (t.created_at as string) || cTx;
+                send({
+                  event_id: eid(), event_type: "wallet.transaction", entity_type: "wallet",
+                  entity_id: String(t.id), occurred_at: t.created_at, version: epoch(t.created_at as string),
+                  actor_type: "system",
+                  payload: { tx_id: t.id, profile_id: t.profile_id, type: t.type, amount: Number(t.amount || 0), balance_after: t.balance_after ?? null },
+                });
+              }
+
+              send({
+                event_id: eid(), event_type: "system.heartbeat", entity_type: "system",
+                entity_id: "-", occurred_at: nowIso(), actor_type: "system",
+                payload: { lag_ms: Date.now() - tickStart },
+              });
+
+              const elapsed = Date.now() - tickStart;
+              await new Promise((r) => setTimeout(r, Math.max(0, TICK_MS - elapsed)));
+            }
+          } catch {
+            /* client disconnected or upstream error → close cleanly */
+          } finally {
+            try { controller.close(); } catch { /* already closed */ }
+          }
+        },
+      });
+
+      return new Response(stream, {
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-store, no-transform",
+          connection: "keep-alive",
+          "x-accel-buffering": "no",
+          ...originHeaders(env, req),
+        },
+      });
     }
 
     // ── Player 360 — FIND-019 UUID validation ─────────────────────────

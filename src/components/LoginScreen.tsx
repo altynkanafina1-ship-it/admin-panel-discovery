@@ -52,7 +52,7 @@ export default function LoginScreen({ onSuccess }: { onSuccess: (s: AdminSession
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               autoComplete="username"
-              className="w-full pl-10 pr-4 py-3 rounded-xl bg-ink-800/70 border border-white/[0.06] focus:border-gold-300/50 focus:outline-none text-ink-100 placeholder:text-ink-500 mono text-sm"
+              className="w-full pl-10 pr-4 py-3 rounded-xl bg-ink-900 border border-ink-700 focus:border-gold-300/60 focus:outline-none text-ink-100 placeholder:text-ink-500 mono text-sm"
               data-testid="login-email"
             />
           </div>
@@ -64,7 +64,7 @@ export default function LoginScreen({ onSuccess }: { onSuccess: (s: AdminSession
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"
-              className="w-full pl-10 pr-4 py-3 rounded-xl bg-ink-800/70 border border-white/[0.06] focus:border-gold-300/50 focus:outline-none text-ink-100 placeholder:text-ink-500 mono text-sm"
+              className="w-full pl-10 pr-4 py-3 rounded-xl bg-ink-900 border border-ink-700 focus:border-gold-300/60 focus:outline-none text-ink-100 placeholder:text-ink-500 mono text-sm"
               data-testid="login-password"
             />
           </div>
@@ -73,7 +73,7 @@ export default function LoginScreen({ onSuccess }: { onSuccess: (s: AdminSession
           </button>
           {err && <div className="text-xs text-accent-rose/90 px-1 pt-1 mono" data-testid="login-error">{err}</div>}
         </form>
-        <div className="mt-7 pt-5 border-t border-white/[0.05] flex items-start gap-3 text-[12px] text-ink-400 leading-relaxed">
+        <div className="mt-7 pt-5 border-t border-ink-700/70 flex items-start gap-3 text-[12px] text-ink-400 leading-relaxed">
           <ShieldCheck className="w-4 h-4 text-accent-mint mt-0.5 shrink-0" />
           <span>
             Сервер: Cloudflare Pages Function · пароль защищён PBKDF2-SHA256 ·
