@@ -37,7 +37,7 @@ import { fmtCoin, fmtNum, fmtRelative, clsx } from "@/lib/format";
 import { Kpi, PageHeader, Section, Skeleton, Empty } from "@/components/ui";
 import { Link } from "react-router-dom";
 import { GAME_URL } from "@/lib/supabase";
-import { useRealtimeTable } from "@/lib/realtime";
+import { useRealtimeEvent } from "@/lib/adminRealtime";
 import CountUp from "@/components/CountUp";
 import LiveFeed from "@/components/LiveFeed";
 import { useToast } from "@/components/Toast";
@@ -49,22 +49,28 @@ export default function Overview() {
   const knownPlayers = useRef<number | null>(null);
   const knownActiveGames = useRef<number | null>(null);
 
-  // Realtime: when games or moves change, invalidate everything
-  useRealtimeTable("games", () => {
-    qc.invalidateQueries({ queryKey: ["games", "active"] });
-    qc.invalidateQueries({ queryKey: ["games", "recent"] });
-    qc.invalidateQueries({ queryKey: ["totals"] });
-    qc.invalidateQueries({ queryKey: ["activity-feed"] });
-  });
-  useRealtimeTable("moves", () => {
-    qc.invalidateQueries({ queryKey: ["games", "active"] });
-    qc.invalidateQueries({ queryKey: ["totals"] });
-    qc.invalidateQueries({ queryKey: ["activity-feed"] });
-  });
-  useRealtimeTable("public_profiles", () => {
-    qc.invalidateQueries({ queryKey: ["active-users"] });
-    qc.invalidateQueries({ queryKey: ["totals"] });
-    qc.invalidateQueries({ queryKey: ["activity-feed"] });
+  // Secure realtime: events arrive from the Cloudflare authn gateway (service-role
+  // server-side). We do TARGETED, scoped invalidation per event type — never a
+  // blanket invalidateQueries (FIND V2-003 / V2-UX-3 / SLO: no full-table refetch).
+  useRealtimeEvent((e) => {
+    switch (e.entity_type) {
+      case "game":
+        qc.invalidateQueries({ queryKey: ["games", "active"] });
+        if (e.event_type === "game.ended")
+          qc.invalidateQueries({ queryKey: ["games", "recent"] });
+        qc.invalidateQueries({ queryKey: ["totals"] });
+        qc.invalidateQueries({ queryKey: ["activity-feed"] });
+        break;
+      case "player":
+        qc.invalidateQueries({ queryKey: ["active-users"] });
+        qc.invalidateQueries({ queryKey: ["totals"] });
+        break;
+      case "stake":
+      case "wallet":
+        qc.invalidateQueries({ queryKey: ["stakes", "recent"] });
+        qc.invalidateQueries({ queryKey: ["wallets-summary"] });
+        break;
+    }
   });
 
   const totals = useQuery({ queryKey: ["totals"], queryFn: fetchTotals, refetchInterval: 15_000 });
@@ -248,8 +254,8 @@ export default function Overview() {
                 <AreaChart data={signup.data ?? []}>
                   <defs>
                     <linearGradient id="gSignup" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#E9BC56" stopOpacity={0.4} />
-                      <stop offset="100%" stopColor="#E9BC56" stopOpacity={0} />
+                      <stop offset="0%" stopColor="#C39A48" stopOpacity={0.4} />
+                      <stop offset="100%" stopColor="#C39A48" stopOpacity={0} />
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="2 4" vertical={false} />
@@ -262,14 +268,14 @@ export default function Overview() {
                   <YAxis axisLine={false} tickLine={false} width={28} />
                   <Tooltip
                     contentStyle={{
-                      background: "#0F0F16",
-                      border: "1px solid #262633",
+                      background: "#FFFDF8",
+                      border: "1px solid #D9C9B7",
                       borderRadius: 10,
                       fontSize: 12,
+                      color: "#2B241E",
                     }}
-                    labelStyle={{ color: "#E9BC56" }}
                   />
-                  <Area type="monotone" dataKey="count" stroke="#E9BC56" strokeWidth={2} fill="url(#gSignup)" />
+                  <Area type="monotone" dataKey="count" stroke="#C39A48" strokeWidth={2} fill="url(#gSignup)" />
                 </AreaChart>
               </ResponsiveContainer>
             )}
@@ -293,8 +299,8 @@ export default function Overview() {
                 <AreaChart data={games.data ?? []}>
                   <defs>
                     <linearGradient id="gGames" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#5BD3A9" stopOpacity={0.35} />
-                      <stop offset="100%" stopColor="#5BD3A9" stopOpacity={0} />
+                      <stop offset="0%" stopColor="#56815D" stopOpacity={0.35} />
+                      <stop offset="100%" stopColor="#56815D" stopOpacity={0} />
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="2 4" vertical={false} />
@@ -302,14 +308,14 @@ export default function Overview() {
                   <YAxis axisLine={false} tickLine={false} width={28} />
                   <Tooltip
                     contentStyle={{
-                      background: "#0F0F16",
-                      border: "1px solid #262633",
+                      background: "#FFFDF8",
+                      border: "1px solid #D9C9B7",
                       borderRadius: 10,
                       fontSize: 12,
+                      color: "#2B241E",
                     }}
-                    labelStyle={{ color: "#5BD3A9" }}
                   />
-                  <Area type="monotone" dataKey="count" stroke="#5BD3A9" strokeWidth={2} fill="url(#gGames)" />
+                  <Area type="monotone" dataKey="count" stroke="#56815D" strokeWidth={2} fill="url(#gGames)" />
                 </AreaChart>
               </ResponsiveContainer>
             )}
@@ -582,7 +588,7 @@ function Funnel({
             return (
               <div key={s.label} className="grid grid-cols-[180px_1fr_auto] items-center gap-4">
                 <div className="text-sm text-ink-300">{s.label}</div>
-                <div className="relative h-7 rounded-md bg-white/[0.025] overflow-hidden">
+                <div className="relative h-7 rounded-md bg-ink-800/70 overflow-hidden">
                   <div
                     className={clsx(
                       "absolute inset-y-0 left-0 transition-all rounded-md",
@@ -631,8 +637,8 @@ function Heatmap({ data }: { data: number[][] }) {
           {row.map((v, c) => {
             const intensity = v === 0 ? 0 : v / max;
             const bg = v === 0
-              ? "rgba(255,255,255,0.03)"
-              : `rgba(212,162,58,${0.15 + intensity * 0.85})`;
+              ? "rgba(43,36,30,0.05)"
+              : `rgba(195,154,72,${0.15 + intensity * 0.85})`;
             return (
               <div
                 key={c}
@@ -650,7 +656,7 @@ function Heatmap({ data }: { data: number[][] }) {
           <span
             key={i}
             className="w-3 h-3 rounded-[2px]"
-            style={{ background: `rgba(212,162,58,${0.15 + a * 0.85})` }}
+            style={{ background: `rgba(195,154,72,${0.15 + a * 0.85})` }}
           />
         ))}
         <span>больше</span>

@@ -14,6 +14,8 @@ import {
 } from "lucide-react";
 import { logout, type AdminSession } from "@/services/auth";
 import CommandPalette from "@/components/CommandPalette";
+import LiveStatus from "@/components/LiveStatus";
+import { adminRealtime } from "@/lib/adminRealtime";
 
 const nav = [
   { to: "/overview", label: "Обзор", icon: LayoutDashboard, group: "Наблюдение" },
@@ -40,7 +42,7 @@ export default function Layout({
   const qc = useQueryClient();
   return (
     <div className="min-h-screen flex">
-      <aside className="w-64 shrink-0 border-r border-white/[0.05] bg-ink-900/40 backdrop-blur-xl flex flex-col sticky top-0 h-screen">
+      <aside className="w-64 shrink-0 border-r border-ink-700 bg-ink-900/85 backdrop-blur-xl flex flex-col sticky top-0 h-screen">
         <div className="px-6 py-7">
           <div className="flex items-center gap-3">
             <div className="relative w-9 h-9">
@@ -78,7 +80,7 @@ export default function Layout({
                             "flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all relative",
                             active
                               ? "bg-gold-300/10 text-gold-100"
-                              : "text-ink-300 hover:bg-white/[0.03] hover:text-ink-100",
+                              : "text-ink-300 hover:bg-ink-900 hover:text-ink-100",
                           ].join(" ")
                         }
                       >
@@ -95,7 +97,7 @@ export default function Layout({
           ))}
         </nav>
 
-        <div className="px-4 pb-5 pt-3 border-t border-white/[0.04] mt-4">
+        <div className="px-4 pb-5 pt-3 border-t border-ink-700/70 mt-4">
           <div className="text-[10px] uppercase tracking-[0.2em] text-ink-500 mb-2">
             Статус
           </div>
@@ -113,13 +115,16 @@ export default function Layout({
               //    the cookie-clear and surface 401s in the console.
               qc.cancelQueries();
               qc.clear();
+              // Tear down the realtime stream so a logged-out browser holds no
+              // subscription (FIND V2-003 / test scenario 7).
+              adminRealtime.stop();
               // 2) Flip UI to the login screen synchronously.
               onLogout();
               // 3) Fire-and-forget the server-side cookie clear.
               void logout();
             }}
             data-testid="logout-button"
-            className="mt-4 w-full text-xs text-ink-400 hover:text-ink-200 transition-colors flex items-center justify-center gap-2 py-2 rounded-lg border border-white/[0.04] hover:border-white/[0.08]"
+            className="mt-4 w-full text-xs text-ink-400 hover:text-ink-200 transition-colors flex items-center justify-center gap-2 py-2 rounded-lg border border-ink-700/70 hover:border-ink-600"
           >
             <LogOut className="w-3 h-3" />
             Выйти
@@ -128,22 +133,23 @@ export default function Layout({
       </aside>
 
       <main className="flex-1 min-w-0">
-        <div className="sticky top-0 z-30 backdrop-blur-xl bg-ink-950/60 border-b border-white/[0.04]">
+        <div className="sticky top-0 z-30 backdrop-blur-xl bg-ink-950/85 border-b border-ink-700/70">
           <div className="px-10 h-14 max-w-[1400px] mx-auto flex items-center justify-between gap-4">
-            <div className="text-xs text-ink-500">
-              Production · <span className="text-ink-300">shashki-royale.pages.dev</span>
+            <div className="text-xs text-ink-400">
+              Production · <span className="text-ink-200">shashki-royale.pages.dev</span>
             </div>
             <div className="flex items-center gap-3">
+              <LiveStatus />
               <button
-                onClick={async () => {
-                  qc.clear();
-                  await qc.invalidateQueries();
+                onClick={() => {
+                  // Scoped resync (no destructive qc.clear → no refetch storm; FIND V2-UX-3).
+                  void qc.invalidateQueries();
                 }}
-                className="px-2.5 py-1.5 rounded-lg border border-white/[0.06] text-[11px] text-ink-300 hover:bg-white/[0.04] hover:text-ink-100 inline-flex items-center gap-1.5 transition-all"
-                title="Сбросить кэш и подтянуть свежие данные из Supabase"
+                className="px-2.5 py-1.5 rounded-lg border border-ink-700 text-[11px] text-ink-300 hover:bg-ink-800/60 hover:text-ink-100 inline-flex items-center gap-1.5 transition-colors"
+                title="Подтянуть свежие данные (мягкая ресинхронизация)"
                 data-testid="force-sync-btn"
               >
-                <RefreshCw className="w-3 h-3" /> Sync
+                <RefreshCw className="w-3 h-3" /> Resync
               </button>
               <CommandPalette />
             </div>

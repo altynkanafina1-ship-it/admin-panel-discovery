@@ -51,7 +51,7 @@ export function Kpi({
         <div className="flex items-start justify-between">
           <div className="text-[11px] uppercase tracking-[0.18em] text-ink-400">{label}</div>
           {icon && (
-            <div className="w-8 h-8 rounded-lg border border-white/[0.05] bg-white/[0.02] flex items-center justify-center text-ink-300">
+            <div className="w-8 h-8 rounded-lg border border-ink-700 bg-ink-900 flex items-center justify-center text-ink-300">
               {icon}
             </div>
           )}
@@ -115,7 +115,7 @@ export function Skeleton({ rows = 5 }: { rows?: number }) {
       {Array.from({ length: rows }).map((_, i) => (
         <div
           key={i}
-          className="h-10 rounded-lg bg-white/[0.025] animate-pulse"
+          className="h-10 rounded-lg bg-ink-800/70 animate-pulse"
           style={{ opacity: 1 - i * 0.08 }}
         />
       ))}
